@@ -1,0 +1,11 @@
+#menu {
+    .float = left;
+}
+
+body {
+    display: flex;
+}
+
+main {
+    flex: 1;
+}
