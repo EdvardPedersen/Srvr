@@ -10,20 +10,29 @@ const Page = struct {
     content: []u8,
 };
 
-pub fn read_everything(io: std.Io, alloc: std.mem.Allocator, map: *map_type) void {
+pub fn read_everything(io: std.Io, alloc: std.mem.Allocator, map: *map_type, last_read: *std.Io.Timestamp) void {
+    if(last_read.addDuration(.fromSeconds(5)).compare(.gt, std.Io.Timestamp.now(io, .real))) return;
+    last_read.* = std.Io.Timestamp.now(io, .real);
     const cwd = std.Io.Dir.cwd();
     const www = cwd.openDir(io, "www/", .{.iterate = true}) catch unreachable;
     defer www.close(io);
     
-    map.clearRetainingCapacity();
-
     var iter = www.iterate();
     while(iter.next(io) catch unreachable) |file| {
-        std.debug.print("{s}\n", .{file.name});
+        std.debug.print("Reading file {s}\n", .{file.name});
+        const info = www.statFile(io, file.name, .{}) catch unreachable;
+        if(map.contains(file.name)) {
+            std.debug.print("In map!\n", .{});
+            const old_val = map.get(file.name) orelse unreachable;
+            if(old_val.last_modified.compare(.eq, info.mtime)) continue;
+            std.debug.print("Modified {s}\n", .{file.name});
+        }
+        std.debug.print("Adding file {s}\n", .{file.name});
         var page = alloc.create(Page) catch unreachable;
         page.name = alloc.dupe(u8, file.name) catch unreachable;
+        page.last_modified = info.mtime;
         page.content = www.readFileAlloc(io, file.name, alloc, .unlimited) catch unreachable;
-        map.put(page.name, page.*) catch unreachable;
+        _ = map.getOrPutValue(page.name, page.*) catch unreachable;
     }
 }
 
@@ -58,12 +67,7 @@ pub fn render_menu(writer: *std.Io.Writer, pages: map_type) void {
 
 pub fn render_page(writer: *std.Io.Writer, page: [] const u8, pages: map_type) void {
     writer.print("<main>\n", .{}) catch unreachable;
-    var to_print: Page = undefined;
-    if(std.mem.eql(u8, page[1..], "")) {
-        to_print = pages.get("index") orelse unreachable;
-    } else {
-       to_print = pages.get(page[1..]) orelse unreachable;
-    }
+    const to_print = pages.get(page[1..]) orelse pages.get("index.html") orelse unreachable;
     writer.print("{s}", .{to_print.content}) catch unreachable;
     writer.print("</main>\n", .{}) catch unreachable;
 }
@@ -81,7 +85,8 @@ pub fn main(init: std.process.Init) !void{
 
     var pages = map_type.init(init.gpa);
 
-    read_everything(io, init.gpa, &pages);
+    var last_read: std.Io.Timestamp = .zero;
+    read_everything(io, init.gpa, &pages, &last_read);
 
     while(true) {
         const stream = try server.accept(io);
@@ -96,7 +101,7 @@ pub fn main(init: std.process.Init) !void{
 
         var responsewriter = std.Io.Writer.Allocating.init(init.gpa);
         defer responsewriter.deinit();
-        read_everything(io, init.gpa, &pages);
+        read_everything(io, init.gpa, &pages, &last_read);
         render_header(&responsewriter.writer);
         render_menu(&responsewriter.writer, pages);
         render_page(&responsewriter.writer, request.head.target, pages);
